@@ -12,55 +12,72 @@ import (
 	"time"
 )
 
+type Secret []byte
+
+type Header struct {
+	Alg string `json:"alg"`
+	Typ string `json:"typ"`
+}
+
+var defaultHeader = Header{
+	Alg: "HS256",
+	Typ: "JWT",
+}
+
 const (
 	jsonTag = "json"
 	expTag = "exp"
 )
 
-func Encode(payload interface{}, secret string) (token string, err error) {
-	type Header = struct {
-		Alg string `json:"alg"`
-		Typ string `json:"typ"`
+func Encode(payload interface{}, secret Secret) (token string, err error) {
+	headerJSON, err := json.Marshal(defaultHeader)
+	if err != nil {
+		return "", errors.New("can't marshal header")
 	}
-	header := Header{
-		Alg: "HS256",
-		Typ: "JWT",
-	}
+	headerEncoded := base64.RawURLEncoding.EncodeToString(headerJSON)
 
-	jHeader, err := json.Marshal(header)
+	payloadJSON, err := json.Marshal(payload)
 	if err != nil {
-		return "", err
+		return "", errors.New("can't marshall payload")
 	}
-	eHeader := base64.RawURLEncoding.EncodeToString(jHeader)
-	jPayload, err := json.Marshal(payload)
-	if err != nil {
-		return "", err
-	}
-	encodedPayload := base64.RawURLEncoding.EncodeToString(jPayload)
-	signatureValue := eHeader + "." + encodedPayload
-	return signatureValue + "." + hash(signatureValue, secret), nil
+	payloadEncoded := base64.RawURLEncoding.EncodeToString(payloadJSON)
+
+	signatureEncoded := calculateSignatureEncoded(headerEncoded, payloadEncoded, secret)
+
+	return fmt.Sprintf("%s.%s.%s", headerEncoded, payloadEncoded, signatureEncoded), nil
 }
 
-func Decode(token string, payload interface{}) error {
-	parts := strings.Split(token, ".")
-	if len(parts) != 3 {
-		return errors.New("invalid token: token should contain header, payload and secret")
+func Decode(token string, payload interface{}) (err error) {
+	parts, err := splitToken(token)
+	if err != nil {
+		return err
 	}
 
-	decodedPayload, PayloadErr := base64.RawURLEncoding.DecodeString(parts[1])
-	if PayloadErr != nil {
-		return fmt.Errorf("invalid payload: %s", PayloadErr.Error())
+	payloadEncoded := parts[1]
+	payloadJSON, err := base64.RawURLEncoding.DecodeString(payloadEncoded)
+	if err != nil {
+		return errors.New("can't decode payload")
 	}
-
-	ParseErr := json.Unmarshal(decodedPayload, &payload)
-	if ParseErr != nil {
-		return fmt.Errorf("invalid payload: %s", ParseErr.Error())
+	err = json.Unmarshal(payloadJSON, payload)
+	if err != nil {
+		return errors.New("can't unmarshall payload")
 	}
 
 	return nil
 }
 
-func Verify(payload interface{}, token, secret string) error {
+func Verify(token string, secret Secret) (ok bool, err error) {
+	parts, err := splitToken(token)
+	if err != nil {
+		return false, err
+	}
+	headerEncoded, payloadEncoded, signatureEncoded := parts[0], parts[1], parts[2]
+
+	verificationEncoded := calculateSignatureEncoded(headerEncoded, payloadEncoded, secret)
+	return signatureEncoded == verificationEncoded, nil
+}
+
+func IsNotExpired(payload interface{}, moment time.Time) (ok bool, err error) {
 	reflectType := reflect.TypeOf(payload)
 	reflectValue := reflect.ValueOf(payload)
 	if reflectType.Kind() == reflect.Ptr {
@@ -69,49 +86,44 @@ func Verify(payload interface{}, token, secret string) error {
 	}
 
 	if reflectType.Kind() != reflect.Struct {
-		panic(errors.New("give me struct or pointer to it"))
+		return false, errors.New("give me struct or pointer to it")
 	}
 
 	fieldCount := reflectType.NumField()
 	for i := 0; i < fieldCount; i++ {
 		field := reflectType.Field(i)
+
 		tag, ok := field.Tag.Lookup(jsonTag)
 		if !ok {
 			continue
 		}
+
 		if tag == expTag {
 			value := reflectValue.Field(i)
 			if value.Kind() != reflect.Int64 {
-				panic(errors.New("exp should be int64"))
+				return false, errors.New("exp should be int64")
 			}
 			exp := value.Interface().(int64)
-
-			if exp != 0 && time.Now().Unix() > exp {
-				return errors.New("expired")
-			}
-
-			parts := strings.Split(token, ".")
-			signatureValue := parts[0] + "." + parts[1]
-
-
-			if validMAC(token, signatureValue, secret) == false {
-				return errors.New("invalid token")
-			}
+			return exp > moment.Unix(), nil
 		}
 	}
-	return nil
+
+	panic(errors.New("no field with json:exp tag"))
 }
 
-func validMAC(jwt, signatureValue, key string) bool {
+func splitToken(token string) (parts []string, err error) {
+	parts = strings.Split(token, ".")
+	if len(parts) != 3 {
+		return nil, errors.New("bad token")
+	}
 
-	signatureValue = signatureValue + "." + hash(signatureValue, key)
-
-	return hmac.Equal([]byte(jwt), []byte(signatureValue))
+	return parts, nil
 }
 
-func hash(src string, secret string) string {
-	key := []byte(secret)
-	h := hmac.New(sha256.New, key)
-	h.Write([]byte(src))
-	return base64.StdEncoding.EncodeToString(h.Sum(nil))
+func calculateSignatureEncoded(headerEncoded string, payloadEncoded string, secret []byte) string {
+	h := hmac.New(sha256.New, secret)
+	h.Write([]byte(headerEncoded + "." + payloadEncoded))
+	signature := h.Sum(nil)
+
+	return base64.RawURLEncoding.EncodeToString(signature)
 }

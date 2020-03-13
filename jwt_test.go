@@ -16,7 +16,7 @@ func TestVerify(t *testing.T) {
 		Exp: time.Now().Add(time.Hour * 10).Unix(),
 	}
 
-	secret := "hushhh"
+	var secret Secret = []byte("secret")
 
 	token, err := Encode(payload, secret)
 	if err != nil {
@@ -32,8 +32,21 @@ func TestVerify(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = Verify(payload, token, secret)
+	ok, err := Verify(token, secret)
 	if err != nil {
 		t.Fatal(err)
+	}
+
+	if !ok {
+		t.Fatal("not ok found")
+	}
+
+	ok, err = IsNotExpired(payload, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !ok {
+		t.Fatal("not ok found")
 	}
 }
